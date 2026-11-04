@@ -33,7 +33,10 @@ ENV_PATH = APP_DIR / ".env"
 load_dotenv(dotenv_path=ENV_PATH, override=False)
 ENV_FILE_VALUES = dotenv_values(ENV_PATH)
 
-HOTKEY = "alt+q"
+HOTKEY_SHOW = "alt+q"  # 读取剪贴板并弹出翻译窗口
+HOTKEY_HIDE = "alt+c"  # 隐藏窗口（小退），进程保留
+HOTKEY_QUIT = "alt+g"  # 彻底结束程序（大退）
+
 MODEL = "deepseek-chat"
 BASE_URL = "https://api.deepseek.com"
 SYSTEM_PROMPT = """你是一个拥有10年经验的资深 STM32 嵌入式开发工程师。
@@ -61,6 +64,8 @@ DIM = "#00b34a"
 BORDER = "#00ff66"
 FONT_BODY = ("Microsoft YaHei UI", 12)
 FONT_SMALL = ("Consolas", 9, "bold")
+
+FOOTER_HINT = "Alt+C 隐藏 · Alt+G 退出"
 
 PLACEHOLDER_KEYS = {
     "",
@@ -167,7 +172,7 @@ class TranslatorApp:
 
         self.footer = tk.Label(
             self.content,
-            text="点击关闭",
+            text=FOOTER_HINT,
             font=FONT_SMALL,
             bg=BG,
             fg=DIM,
@@ -183,7 +188,6 @@ class TranslatorApp:
         self.last_hotkey_at = 0.0
         self.demo_mode = False
         self.hotkey_ready = False
-        self._hotkey_handle: int | None = None
         self._poll_job: str | None = None
 
         for widget in (
@@ -219,7 +223,7 @@ class TranslatorApp:
 
     def show_text(self, text: str, *, loading: bool = False) -> None:
         self.body.configure(text=text, fg=FG)
-        self.footer.configure(text="请求中 · 点击关闭" if loading else "点击关闭")
+        self.footer.configure(text="请求中 · Alt+C 隐藏" if loading else FOOTER_HINT)
         self._fit_and_place()
         self.root.deiconify()
         self.root.attributes("-topmost", True)
@@ -234,11 +238,18 @@ class TranslatorApp:
             "Pin = 引脚。常用于 LED 闪烁。"
         )
 
+    def hide_window(self) -> None:
+        """Alt+C：小退，只隐藏窗口，进程继续驻留；再按 Alt+Q 可重新唤起。"""
+        # 作废在途请求，避免窗口隐藏后结果又把窗口顶出来。
+        self.active_request_id = None
+        self.root.withdraw()
+
     def hide_overlay(self, _event: tk.Event | None = None) -> None:
-        # 使仍在途的请求结果失效，避免关闭后又突然弹出。
+        """点击窗口 / Esc：隐藏悬浮窗；预览模式或快捷键不可用时直接退出。"""
         self.active_request_id = None
         self.root.withdraw()
         if self.demo_mode or not self.hotkey_ready:
+            # 没有 Alt+Q 可用时，隐藏后无法再唤起，因此直接退出。
             self._shutdown()
 
     def _shutdown(self) -> None:
@@ -252,11 +263,22 @@ class TranslatorApp:
 
     # -- 快捷键与主循环 ---------------------------------------------------
 
-    def register_hotkey(self) -> None:
+    def register_hotkeys(self) -> None:
+        """只注册三个全局快捷键：Alt+Q 显示、Alt+C 隐藏、Alt+G 退出。"""
         try:
-            self._hotkey_handle = keyboard.add_hotkey(
-                HOTKEY,
-                lambda: self.events.put("hotkey"),
+            keyboard.add_hotkey(
+                HOTKEY_SHOW,
+                lambda: self.events.put("show"),
+                suppress=False,
+            )
+            keyboard.add_hotkey(
+                HOTKEY_HIDE,
+                lambda: self.events.put("hide"),
+                suppress=False,
+            )
+            keyboard.add_hotkey(
+                HOTKEY_QUIT,
+                self.force_quit,
                 suppress=False,
             )
             self.hotkey_ready = True
@@ -267,12 +289,19 @@ class TranslatorApp:
                 f"{type(exc).__name__}: {exc}"
             )
 
+    @staticmethod
+    def force_quit() -> None:
+        """Alt+G：大退，直接结束进程（keyboard 回调线程里调用）。"""
+        os._exit(0)
+
     def _poll_queues(self) -> None:
         try:
             while True:
                 event = self.events.get_nowait()
-                if event == "hotkey":
+                if event == "show":
                     self._handle_hotkey()
+                elif event == "hide":
+                    self.hide_window()
         except queue.Empty:
             pass
 
@@ -374,7 +403,7 @@ class TranslatorApp:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="STM32 极速翻译：复制代码后按 Alt+Q，使用 DeepSeek 生成简短解释。"
+        description="STM32 极速翻译：复制代码后按 Alt+Q 查看解释；Alt+C 隐藏，Alt+G 退出。"
     )
     parser.add_argument(
         "--demo",
@@ -391,9 +420,13 @@ def main() -> int:
         app.show_demo()
         print("预览模式：点击悬浮窗退出。")
     else:
-        app.register_hotkey()
+        app.register_hotkeys()
         if app.hotkey_ready:
-            print(f"已启动，正在监听 {HOTKEY.upper()}。按 Ctrl+C 退出。")
+            print(
+                f"已启动：{HOTKEY_SHOW.upper()} 翻译 | "
+                f"{HOTKEY_HIDE.upper()} 隐藏 | "
+                f"{HOTKEY_QUIT.upper()} 退出"
+            )
         else:
             print("快捷键注册失败，请查看屏幕上的提示。", file=sys.stderr)
 
